@@ -69,7 +69,6 @@ type imageFeatures struct {
 	GridW  int
 }
 
-// Update EncodeMultimodal to correctly handle the pixel values and dimensions
 func (m *Model) EncodeMultimodal(ctx ml.Context, multimodalData []byte) (any, error) {
 	if len(m.VisionModel.Layers) == 0 {
 		return nil, model.ErrNoVisionModel
@@ -85,25 +84,10 @@ func (m *Model) EncodeMultimodal(ctx ml.Context, multimodalData []byte) (any, er
 		return nil, err
 	}
 
-	// Debug output
-	fmt.Printf("Grid dimensions from ProcessImage: T=%d, H=%d, W=%d\n", gridT, gridH, gridW)
-
-	// Calculate tensor dimensions
-	patchDim := m.ImageProcessor.numChannels * m.ImageProcessor.temporalPatchSize *
-		m.ImageProcessor.patchSize * m.ImageProcessor.patchSize
-	numPatches := gridT * gridH * gridW
-
-	fmt.Println("Patch dimensions:", patchDim)
-	fmt.Println("Number of patches:", numPatches)
-
-	// Create tensor with the correct shape
-	pixelValues, err := ctx.Input().FromFloatSlice(f32s, patchDim, numPatches, 3, 1)
+	pixelValues, err := ctx.Input().FromFloatSlice(f32s, image.Bounds().Dx(), image.Bounds().Dy(), 3, 1)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create tensor from image: %w", err)
 	}
-
-	fmt.Println("Pixel values tensor shape:", pixelValues.Shape())
-	fmt.Println(ml.Dump(ctx, pixelValues))
 
 	visionOutputs := m.VisionModel.Forward(ctx, pixelValues)
 	visionOutputs = m.PatchMerger.Forward(ctx, visionOutputs, m.VisionModel.eps)

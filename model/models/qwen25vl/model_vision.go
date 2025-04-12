@@ -1,7 +1,6 @@
 package qwen25vl
 
 import (
-	"fmt"
 	"math"
 
 	"github.com/ollama/ollama/fs"
@@ -120,37 +119,23 @@ type PatchEmbedding struct {
 
 // Forward computes patch embeddings for the vision model
 func (pe *PatchEmbedding) Forward(ctx ml.Context, pixelValues ml.Tensor, patchSize int) ml.Tensor {
-	// Apply both 2D convolutions
-	embeddings0 := pe.PatchConv0.Forward(ctx, pixelValues, patchSize, patchSize, 0, 0, 1, 1)
-	embeddings1 := pe.PatchConv1.Forward(ctx, pixelValues, patchSize, patchSize, 0, 0, 1, 1)
-
-	// Add the two embeddings
+	embeddings0 := pe.PatchConv0.Forward(ctx, pixelValues, patchSize, patchSize, 0, 0, patchSize, patchSize) // Use patchSize stride
+	embeddings1 := pe.PatchConv1.Forward(ctx, pixelValues, patchSize, patchSize, 0, 0, patchSize, patchSize) // Use patchSize stride
 	embeddings := embeddings0.Add(ctx, embeddings1)
+	// embeddings shape: [outW, outH, hiddenSize, N]
+	// where outW = W/patchSize (numPatchesW), outH = H/patchSize (numPatchesH)
 
-	// Get dimensions
-	patchesH := pixelValues.Dim(0) / patchSize
-	patchesW := pixelValues.Dim(1) / patchSize
-	hiddenSize := embeddings0.Dim(2) // The channel dimension after convolution
+	patchesW := embeddings.Dim(0)
+	patchesH := embeddings.Dim(1)
+	hiddenSize := embeddings.Dim(2)
+	batchSizeN := embeddings.Dim(3) // Use N instead of global batchSize
 
-	// Permute: [patchesW, patchesH, hiddenSize, batchSize] -> [hiddenSize, patchesW, patchesH, batchSize]
+	// Permute: [patchesW, patchesH, hiddenSize, N] -> [hiddenSize, patchesW, patchesH, N]
 	embeddings = embeddings.Permute(ctx, 2, 0, 1, 3).Contiguous(ctx)
 
-	// We need to make sure patchesW and patchesH are both even
-	if patchesW%2 != 0 || patchesH%2 != 0 {
-		panic(fmt.Sprintf("Patch dimensions must be even: patchesW=%d, patchesH=%d", patchesW, patchesH))
-	}
-
-	// Reshape: [hiddenSize, patchesW, patchesH, batchSize] -> [hiddenSize*2, patchesW/2, patchesH, batchSize]
-	embeddings = embeddings.Reshape(ctx, hiddenSize*2, patchesW/2, patchesH, batchSize)
-
-	// Reshape: [hiddenSize*2, patchesW/2, patchesH, batchSize] -> [hiddenSize*2, patchesW/2, 2, patchesH/2*batchSize]
-	embeddings = embeddings.Reshape(ctx, hiddenSize*2, patchesW/2, 2, patchesH/2*batchSize)
-
-	// Permute: [hiddenSize*2, patchesW/2, 2, patchesH/2*batchSize] -> [hiddenSize*2, 2, patchesW/2, patchesH/2*batchSize]
-	embeddings = embeddings.Permute(ctx, 0, 2, 1, 3).Contiguous(ctx)
-
-	// Final reshape: [hiddenSize*2, 2, patchesW/2, patchesH/2*batchSize] -> [hiddenSize, patchesW*patchesH, batchSize]
-	return embeddings.Reshape(ctx, hiddenSize, patchesW*patchesH, batchSize)
+	// Reshape: [hiddenSize, patchesW, patchesH, N] -> [hiddenSize, patchesW * patchesH, N]
+	numPatches := patchesW * patchesH
+	return embeddings.Reshape(ctx, hiddenSize, numPatches, batchSizeN)
 }
 
 // VisionPatchMerger implements patch merging for the Qwen vision model
