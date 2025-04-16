@@ -35,8 +35,9 @@ func TestExecuteWithTools(t *testing.T) {
 		{"mistral", `[TOOL_CALLS]  [{"name": "get_current_weather", "arguments": {"format":"fahrenheit","location":"San Francisco, CA"}},{"name": "get_current_weather", "arguments": {"format":"celsius","location":"Toronto, Canada"}}]`, true},
 		{"mistral", `[TOOL_CALLS]  [{"name": "get_current_weather", "arguments": {"format":"fahrenheit","location":"San Francisco, CA"}},{"name": "get_current_weather", "arguments": {"format":"celsius","location":"Toronto, Canada"}}]
 
-The temperature in San Francisco, CA is 70°F and in Toronto, Canada is 20°C.`, true},
-		{"mistral", `[TOOL_CALLS]  [{"name": "get_current_weather", "arguments": {"format":"fahrenheit","location":"San Francisco, CA"}},{"name": "get_current_weather", "arguments": {"format":"celsius","location":"Toronto, Canada"}},{"name": "get_current_weather", "arguments": {"format":"celsius","location":"To }]`, false},
+		The temperature in San Francisco, CA is 70°F and in Toronto, Canada is 20°C.`, true},
+		{"mistral", `[TOOL_CALLS]  [{"name": "get_current_weather", "arguments": {"format":"fahrenheit","location":"San Francisco, CA"}},{"name": "get_current_weather", "arguments": {"format":"celsius","location":"Toronto, Canada"}}]`, true},
+		{"mistral", `[TOOL_CALLS]  [{"name": "get_current_weather", "arguments": {"format":"fahrenheit","location":"San Francisco, `, false},
 		{"mistral", `I'm not aware of that information. However, I can suggest searching for the weather using the "get_current_weather" function:
 
 		[{"name": "get_current_weather", "arguments": {"format":"fahrenheit","location":"San Francisco, CA"}},{"name": "get_current_weather", "arguments": {"format":"celsius","location":"Toronto, Canada"}}]`, true},
@@ -68,6 +69,10 @@ The temperature in San Francisco, CA is 70°F and in Toronto, Canada is 20°C.`,
 </tool_call>`, true},
 		{"xlam", `{"tool_calls": [{"name": "get_current_weather", "arguments": {"format":"fahrenheit","location":"San Francisco, CA"}},{"name": "get_current_weather", "arguments": {"format":"celsius","location":"Toronto, Canada"}}]}`, true},
 		{"nemotron", `<toolcall>{"name": "get_current_weather", "arguments": {"format":"fahrenheit","location":"San Francisco, CA"}},{"name": "get_current_weather", "arguments": {"format":"celsius","location":"Toronto, Canada"}}]} </toolcall>`, true},
+		{"qwen2.5-coder", `<tool_call>
+{"name": "get_current_weather", "arguments": {"format":"fahrenheit","location":"San Francisco, CA"}},{"name": "get_current_weather", "arguments": {"format":"celsius","location":"Toronto, Canada"}}
+</tool_call>`, true},
+		{"qwen2.5-coder", " The weather in San Francisco, CA is 70°F and in Toronto, Canada is 20°C.", false},
 	}
 
 	var tools []api.Tool
@@ -121,9 +126,11 @@ The temperature in San Francisco, CA is 70°F and in Toronto, Canada is 20°C.`,
 
 			t.Run("parse", func(t *testing.T) {
 				m := &Model{Template: tmpl}
-				actual, ok := m.parseToolCalls(tt.output)
+				actual, ok := m.ParseToolCallsNew(tt.output)
 				if ok != tt.ok {
-					t.Fatalf("expected %t, got %t", tt.ok, ok)
+					t.Errorf("expected %t, got %t", tt.ok, ok)
+					t.Logf("actual: %+v", actual)
+					t.Logf("output: %s", tt.output)
 				}
 
 				if tt.ok {
@@ -171,6 +178,51 @@ func TestParseObjects(t *testing.T) {
 		t.Run(tc.input, func(t *testing.T) {
 			got := parseObjects(tc.input)
 
+			if diff := cmp.Diff(got, tc.want); diff != "" {
+				t.Errorf("mismatch (-got +want):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestParseToolCallsNew(t *testing.T) {
+	tests := []struct {
+		input string
+		want  []api.ToolCall
+	}{
+		{
+			input: `[TOOL_CALLS] [{"name":"get_conditions","arguments":{"city":"Tokyo"}}]`,
+			want: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{Name: "get_conditions", Arguments: map[string]any{"city": "Tokyo"}},
+				},
+			},
+		},
+		{
+			input: `<toolcall>{"name": "get_current_weather", "arguments": {"format":"fahrenheit","location":"San Francisco, CA"}} </toolcall> <toolcall>{"name": "get_current_weather", "arguments": {"format":"celsius","location":"Toronto, ON"}} </toolcall>`,
+			want: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{Name: "get_current_weather", Arguments: map[string]any{"format": "fahrenheit", "location": "San Francisco, CA"}},
+				},
+				{
+					Function: api.ToolCallFunction{Name: "get_current_weather", Arguments: map[string]any{"format": "celsius", "location": "Toronto, ON"}},
+				},
+			},
+		},
+		// TODO: for the streaming case we want to be able to do partial matching
+		// {
+		// 	input: `<toolcall>{"name": "`,
+		// 	want:  []api.ToolCall{},
+		// },
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			m := &Model{}
+			got, ok := m.ParseToolCallsNew(tc.input)
+			if !ok {
+				t.Errorf("expected true, got false")
+			}
 			if diff := cmp.Diff(got, tc.want); diff != "" {
 				t.Errorf("mismatch (-got +want):\n%s", diff)
 			}
