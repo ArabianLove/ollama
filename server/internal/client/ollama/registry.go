@@ -225,6 +225,18 @@ type Registry struct {
 	// Mask, if set, is the name used to convert non-fully qualified names
 	// to fully qualified names. If empty, [DefaultMask] is used.
 	Mask string
+
+	// ReadTimeout specifies the maximum time to wait for a read during a
+	// blob download.
+	// If zero, the default is 30 seconds.
+	ReadTimeout time.Duration
+}
+
+func (r *Registry) readTimeout() time.Duration {
+	if r.ReadTimeout != 0 {
+		return r.ReadTimeout
+	}
+	return 30 * time.Second
 }
 
 func (r *Registry) cache() (*blob.DiskCache, error) {
@@ -263,6 +275,7 @@ func DefaultRegistry() (*Registry, error) {
 	}
 
 	var rc Registry
+	rc.ReadTimeout = 30 * time.Second
 	rc.UserAgent = UserAgent()
 	rc.Key, err = ssh.ParseRawPrivateKey(keyPEM)
 	if err != nil {
@@ -489,6 +502,12 @@ func (r *Registry) Pull(ctx context.Context, name string) error {
 	for _, l := range layers {
 		var received atomic.Int64
 		update := func(n int64, err error) {
+			if n == 0 && err == nil {
+				// Clients expect an update with no progress and no error to mean "starting download".
+				// This is not the case here,
+				// so we don't want to send an update in this case.
+				return
+			}
 			completed.Add(n)
 			t.update(l, received.Add(n), err)
 		}
@@ -562,6 +581,21 @@ func (r *Registry) Pull(ctx context.Context, name string) error {
 						}
 					}()
 
+					ctx, cancel := context.WithCancelCause(ctx)
+					defer cancel(nil)
+
+					// TODO(bmizerany): make this timeout configurable
+					timer := time.AfterFunc(r.readTimeout(), func() {
+						cancel(fmt.Errorf("%w: downloading %s %d-%d/%d",
+							context.DeadlineExceeded,
+							cs.Digest.Short(),
+							cs.Chunk.Start,
+							cs.Chunk.End,
+							l.Size,
+						))
+					})
+					defer timer.Stop()
+
 					req, err := http.NewRequestWithContext(ctx, "GET", cs.URL, nil)
 					if err != nil {
 						return err
@@ -574,8 +608,11 @@ func (r *Registry) Pull(ctx context.Context, name string) error {
 					defer res.Body.Close()
 
 					tr := &trackingReader{
-						r:      res.Body,
-						update: update,
+						r: res.Body,
+						update: func(n int64, err error) {
+							timer.Reset(r.readTimeout())
+							update(n, err)
+						},
 					}
 					if err := chunked.Put(cs.Chunk, cs.Digest, tr); err != nil {
 						return err
@@ -930,12 +967,6 @@ func (r *Registry) newRequest(ctx context.Context, method, url string, body io.R
 // is parsed from the response body and returned. If any other error occurs, it
 // is returned.
 func sendRequest(c *http.Client, r *http.Request) (_ *http.Response, err error) {
-	defer func() {
-		if err != nil {
-			err = fmt.Errorf("request error %s: %w", r.URL, err)
-		}
-	}()
-
 	if r.URL.Scheme == "https+insecure" {
 		// TODO(bmizerany): clone client.Transport, set
 		// InsecureSkipVerify, etc.
